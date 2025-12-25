@@ -1,6 +1,5 @@
 #!/bin/sh
-
-echo "Patching Passwall to Support HttpUpgrade"
+# Passwall HTTPUpgrade Patch Script
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | logger -t passwall-patch; }
 
@@ -40,10 +39,10 @@ httpupgradepath.placeholder "/"\
 httpupgradepathdepends("transport", "httpupgrade")' "$file"
 }
 
-echo "Patching Passwall to Support HttpUpgrade..."
+echo "Applying CORRECTED HTTPUpgrade patches..."
 fix_node_config
 fix_util_xray  
 fix_subscribe
 
 /etc/init.d/passwall restart
-echo "✅ Patches complited!"
+echo "✅ Patches applied! Check LuCI Node config for HTTPUpgrade option."
