@@ -1,0 +1,48 @@
+#!/bin/sh
+
+echo "Patching Passwall to Support HttpUpgrade"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | logger -t passwall-patch; }
+
+fix_subscribe() {
+    local file="/usr/share/passwall/subscribe.lua"
+    sed -i '/if params.type ws then/,/if params.type h2 or params.type http then/ {
+        /if params.type h2 or params.type http then/i\
+    if params.type httpupgrade then\\
+        result.httpupgradehost params.host\\
+        result.httpupgradepath params.path\\
+    end
+    ' "$file"
+}
+
+fix_util_xray() {
+    local file="/usr/lib/lua/luci/passwall/util_xray.lua"
+    # Patch outbound streamSettings (around line with wsSettings)
+    sed -i '/wsSettings node.transport ws/,/httpSettings node.transport h2/i\
+    httpupgradeSettings node.transport httpupgrade and path node.httpupgradepath or /, host node.httpupgradehost or nil,' "$file"
+    
+    # Patch server streamSettings (if exists)
+    sed -i '/wsSettings.*node.transport ws/,/httpSettings node.transport h2/i\
+    httpupgradeSettings node.transport httpupgrade and path node.httpupgradepath or /, host node.httpupgradehost or nil,' "$file"
+}
+
+fix_node_config() {
+    local file="/usr/lib/lua/luci/model/cbi/node_config.lua"
+    # Add to transport list
+    sed -i 's/transportvalueh2, HTTP2/transportvalueh2, HTTP2 transportvaluehttpupgrade, HTTPUpgrade/g' "$file"
+    
+    # Add form fields (after wspath section)
+    sed -i '/wspathdepends.*trojantransport, ws/i\
+httpupgradehost soptionValue, httpupgradehost, translate("HTTPUpgrade Host")\
+httpupgradehostdepends("transport", "httpupgrade")\
+httpupgradepath soptionValue, httpupgradepath, translate("HTTPUpgrade Path")\
+httpupgradepath.placeholder "/"\
+httpupgradepathdepends("transport", "httpupgrade")' "$file"
+}
+
+echo "Patching Passwall to Support HttpUpgrade..."
+✅ fix_httpupgrade_node
+✅ fix_link parse
+
+/etc/init.d/passwall restart
+echo "✅ Patches complited!"
