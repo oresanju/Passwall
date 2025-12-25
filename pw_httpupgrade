@@ -1,48 +1,95 @@
 #!/bin/sh
-# Passwall HTTPUpgrade Patch Script
+# FIXED Passwall HTTPUpgrade Patch Script for Passwall 1
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | logger -t passwall-patch; }
 
-fix_subscribe() {
-    local file="/usr/share/passwall/subscribe.lua"
-    sed -i '/if params.type ws then/,/if params.type h2 or params.type http then/ {
-        /if params.type h2 or params.type http then/i\
-    if params.type httpupgrade then\\
-        result.httpupgradehost params.host\\
-        result.httpupgradepath params.path\\
+# Correct file paths for Passwall 1
+NODE_CONFIG="/usr/lib/lua/luci/passwall/node_config.lua"
+UTIL_XRAY="/usr/lib/lua/luci/passwall/util_xray.lua"
+SUBSCRIBE="/usr/share/passwall/subscribe.lua"
+
+backup_files() {
+    for file in "$NODE_CONFIG" "$UTIL_XRAY" "$SUBSCRIBE"; do
+        if [ -f "$file" ]; then
+            cp "$file" "${file}.backup.$(date +%Y%m%d_%H%M%S)"
+            log "Backup: $file"
+        fi
+    done
+}
+
+find_and_patch() {
+    local file="$1"
+    local search="$2"
+    local insert="$3"
+    
+    if [ ! -f "$file" ]; then
+        log "ERROR: $file not found!"
+        return 1
+    fi
+    
+    # Check if already patched
+    if grep -q "$search" "$file" 2>/dev/null; then
+        log "Already patched: $file"
+        return 0
+    fi
+    
+    # Find insertion point and patch
+    if sed -n "/$search/=" "$file" | grep -q .; then
+        sed -i "/$search/i\\
+$insert" "$file" && log "Patched: $file" || log "Failed: $file"
+    else
+        log "WARNING: Pattern not found in $file"
+    fi
+}
+
+main() {
+    log "=== Passwall HTTPUpgrade Patch ==="
+    
+    # Create backups
+    backup_files
+    
+    # 1. node_config.lua - Add transport option & fields
+    if [ -f "$NODE_CONFIG" ]; then
+        # Add to transport list (after h2)
+        sed -i 's/\(transportvalueh2, HTTP2\)/\1 transportvaluehttpupgrade, HTTPUpgrade/g' "$NODE_CONFIG"
+        # Add form fields (after wspath)
+        find_and_patch "$NODE_CONFIG" "wspathdepends.*ws$" $'httpupgradehost s:option(Value, "httpupgradehost", translate("HTTPUpgrade Host"))\nhttpupgradehost:depends("transport", "httpupgrade")\nhttpupgradepath s:option(Value, "httpupgradepath", translate("HTTPUpgrade Path"))\nhttpupgradepath.placeholder "/"\nhttpupgradepath:depends("transport", "httpupgrade")'
+        log "✓ node_config.lua patched"
+    fi
+    
+    # 2. util_xray.lua - Add httpupgradeSettings (2 locations)
+    if [ -f "$UTIL_XRAY" ]; then
+        # Patch outbound genoutbound function
+        sed -i '/wsSettings node.transport ws/,/dsSettings node.transport ds/ {
+            /dsSettings/i\
+    httpupgradeSettings node.transport httpupgrade and path node.httpupgradepath or /, host node.httpupgradehost or nil,
+        }' "$UTIL_XRAY"
+        
+        # Patch server genconfigservernode (if exists)
+        sed -i '/wsSettings.*node.transport ws/,/grpcSettings/ {
+            /grpcSettings/i\
+    httpupgradeSettings node.transport httpupgrade and path node.httpupgradepath or /, host node.httpupgradehost or nil,
+        }' "$UTIL_XRAY"
+        log "✓ util_xray.lua patched"
+    fi
+    
+    # 3. subscribe.lua - Add vless httpupgrade parsing
+    if [ -f "$SUBSCRIBE" ]; then
+        sed -i '/if params.type ws then/,/if params.type h2 or params.type http/ {
+            /if params.type h2/ i\
+    if params.type httpupgrade then\
+        result.httpupgradehost = params.host\
+        result.httpupgradepath = params.path\
     end
-    ' "$file"
-}
-
-fix_util_xray() {
-    local file="/usr/lib/lua/luci/passwall/util_xray.lua"
-    # Patch outbound streamSettings (around line with wsSettings)
-    sed -i '/wsSettings node.transport ws/,/httpSettings node.transport h2/i\
-    httpupgradeSettings node.transport httpupgrade and path node.httpupgradepath or /, host node.httpupgradehost or nil,' "$file"
+        }' "$SUBSCRIBE"
+        log "✓ subscribe.lua patched"
+    fi
     
-    # Patch server streamSettings (if exists)
-    sed -i '/wsSettings.*node.transport ws/,/httpSettings node.transport h2/i\
-    httpupgradeSettings node.transport httpupgrade and path node.httpupgradepath or /, host node.httpupgradehost or nil,' "$file"
+    # Restart passwall
+    /etc/init.d/passwall restart >/dev/null 2>&1
+    log "✅ HTTPUpgrade patch COMPLETE!"
+    log "Check LuCI → Nodes → Add Node → Transport dropdown"
 }
 
-fix_node_config() {
-    local file="/usr/lib/lua/luci/model/cbi/node_config.lua"
-    # Add to transport list
-    sed -i 's/transportvalueh2, HTTP2/transportvalueh2, HTTP2 transportvaluehttpupgrade, HTTPUpgrade/g' "$file"
-    
-    # Add form fields (after wspath section)
-    sed -i '/wspathdepends.*trojantransport, ws/i\
-httpupgradehost soptionValue, httpupgradehost, translate("HTTPUpgrade Host")\
-httpupgradehostdepends("transport", "httpupgrade")\
-httpupgradepath soptionValue, httpupgradepath, translate("HTTPUpgrade Path")\
-httpupgradepath.placeholder "/"\
-httpupgradepathdepends("transport", "httpupgrade")' "$file"
-}
-
-echo "Applying CORRECTED HTTPUpgrade patches..."
-fix_node_config
-fix_util_xray  
-fix_subscribe
-
-/etc/init.d/passwall restart
-echo "✅ Patches applied! Check LuCI Node config for HTTPUpgrade option."
+# Run
+main "$@"
