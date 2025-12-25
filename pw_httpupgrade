@@ -1,95 +1,89 @@
 #!/bin/sh
-# FIXED Passwall HTTPUpgrade Patch Script for Passwall 1
-
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | logger -t passwall-patch; }
-
-# Correct file paths for Passwall 1
-NODE_CONFIG="/usr/lib/lua/luci/passwall/node_config.lua"
+# Patch Passwall to support HTTPUpgrade transport
+# Creates .bk backups before modifying
+echo "[#] Patch Passwall to support HTTPUpgrade [#]"
+echo.
+# File paths
 UTIL_XRAY="/usr/lib/lua/luci/passwall/util_xray.lua"
 SUBSCRIBE="/usr/share/passwall/subscribe.lua"
+NODE_CONFIG="/usr/lib/lua/luci/model/cbi/passwall/client/node_config.lua"
 
-backup_files() {
-    for file in "$NODE_CONFIG" "$UTIL_XRAY" "$SUBSCRIBE"; do
-        if [ -f "$file" ]; then
-            cp "$file" "${file}.backup.$(date +%Y%m%d_%H%M%S)"
-            log "Backup: $file"
-        fi
-    done
-}
-
-find_and_patch() {
+# Backup function
+backup_file() {
     local file="$1"
-    local search="$2"
-    local insert="$3"
-    
-    if [ ! -f "$file" ]; then
-        log "ERROR: $file not found!"
-        return 1
-    fi
-    
-    # Check if already patched
-    if grep -q "$search" "$file" 2>/dev/null; then
-        log "Already patched: $file"
-        return 0
-    fi
-    
-    # Find insertion point and patch
-    if sed -n "/$search/=" "$file" | grep -q .; then
-        sed -i "/$search/i\\
-$insert" "$file" && log "Patched: $file" || log "Failed: $file"
+    local backup="${file}.bk"
+    if [ ! -f "$backup" ]; then
+        cp "$file" "$backup"
+        echo "[+] Backup file"
     else
-        log "WARNING: Pattern not found in $file"
+        echo "[-] Backup already exists"
     fi
 }
 
-main() {
-    log "=== Passwall HTTPUpgrade Patch ==="
-    
-    # Create backups
-    backup_files
-    
-    # 1. node_config.lua - Add transport option & fields
-    if [ -f "$NODE_CONFIG" ]; then
-        # Add to transport list (after h2)
-        sed -i 's/\(transportvalueh2, HTTP2\)/\1 transportvaluehttpupgrade, HTTPUpgrade/g' "$NODE_CONFIG"
-        # Add form fields (after wspath)
-        find_and_patch "$NODE_CONFIG" "wspathdepends.*ws$" $'httpupgradehost s:option(Value, "httpupgradehost", translate("HTTPUpgrade Host"))\nhttpupgradehost:depends("transport", "httpupgrade")\nhttpupgradepath s:option(Value, "httpupgradepath", translate("HTTPUpgrade Path"))\nhttpupgradepath.placeholder "/"\nhttpupgradepath:depends("transport", "httpupgrade")'
-        log "✓ node_config.lua patched"
-    fi
-    
-    # 2. util_xray.lua - Add httpupgradeSettings (2 locations)
-    if [ -f "$UTIL_XRAY" ]; then
-        # Patch outbound genoutbound function
-        sed -i '/wsSettings node.transport ws/,/dsSettings node.transport ds/ {
-            /dsSettings/i\
-    httpupgradeSettings node.transport httpupgrade and path node.httpupgradepath or /, host node.httpupgradehost or nil,
-        }' "$UTIL_XRAY"
-        
-        # Patch server genconfigservernode (if exists)
-        sed -i '/wsSettings.*node.transport ws/,/grpcSettings/ {
-            /grpcSettings/i\
-    httpupgradeSettings node.transport httpupgrade and path node.httpupgradepath or /, host node.httpupgradehost or nil,
-        }' "$UTIL_XRAY"
-        log "✓ util_xray.lua patched"
-    fi
-    
-    # 3. subscribe.lua - Add vless httpupgrade parsing
-    if [ -f "$SUBSCRIBE" ]; then
-        sed -i '/if params.type ws then/,/if params.type h2 or params.type http/ {
-            /if params.type h2/ i\
-    if params.type httpupgrade then\
-        result.httpupgradehost = params.host\
-        result.httpupgradepath = params.path\
-    end
-        }' "$SUBSCRIBE"
-        log "✓ subscribe.lua patched"
-    fi
-    
-    # Restart passwall
-    /etc/init.d/passwall restart >/dev/null 2>&1
-    log "✅ HTTPUpgrade patch COMPLETE!"
-    log "Check LuCI → Nodes → Add Node → Transport dropdown"
-}
+# Backup all files first
+backup_file "$UTIL_XRAY"
+backup_file "$SUBSCRIBE"
+backup_file "$NODE_CONFIG"
 
-# Run
-main "$@"
+echo "[+] Patching HTTPUpgrade into Passwall..."
+### 1) subscribe.lua patch
+if ! grep -q "result.httpupgrade_host" "$SUBSCRIBE"; then
+    sed -i '/result.ws_path = params.path/{n;/^[[:space:]]*end[[:space:]]*$/a\
+			if params.type == '\''httpupgrade'\'' then\
+				result.httpupgrade_host = params.host\
+				result.httpupgrade_path = params.path\
+			end
+}' "$SUBSCRIBE"
+fi
+
+### 2) util_xray.lua patches
+if ! grep -Fq 'httpupgradeSettings = (node.transport == "httpupgrade") and {' "$UTIL_XRAY"; then
+    awk '
+    BEGIN { inserted = 0 }
+    /^[\t ]*wsSettings[\t ]*=.*$/ {
+        ws_line = 1
+    }
+    /^[\t ]*\} or nil,$/ {
+        if (ws_line && !inserted) {
+            print $0
+            print "    			httpupgradeSettings = (node.transport == \"httpupgrade\") and {"
+            print "        			path = node.httpupgrade_path or \"/\","
+            print "        			host = node.httpupgrade_host"
+            print "    			} or nil,"
+            inserted = 1
+            ws_line = 0
+            next
+        }
+    }
+    { print }
+    END {
+        if (!inserted) {
+            print "Error: Could not find wsSettings block to patch." > "/dev/stderr"
+            exit 1
+        }
+    }
+    ' "$UTIL_XRAY" > "$UTIL_XRAY.tmp" && mv "$UTIL_XRAY.tmp" "$UTIL_XRAY"
+fi
+
+### 3) node_config.lua patches
+# Transport option
+if ! grep -q 'transport:value("httpupgrade"' "$NODE_CONFIG"; then
+    sed -i '/^[[:space:]]*transport:value("ws", "WebSocket")/a\
+transport:value("httpupgrade", "HTTPUpgrade")' "$NODE_CONFIG"
+fi
+
+# Config fields
+if ! grep -q 'httpupgrade_host' "$NODE_CONFIG"; then
+    sed -i '/ws_earlyDataHeaderName:depends("ws_enableEarlyData", true)/a\
+\
+-- [[ HTTPUpgrade部分 ]]--\
+httpupgrade_host = s:option(Value, "httpupgrade_host", translate("HTTPUpgrade Host"))\
+httpupgrade_host:depends("transport", "httpupgrade")\
+httpupgrade_path = s:option(Value, "httpupgrade_path", translate("HTTPUpgrade Path"))\
+httpupgrade_path.placeholder = "/"\
+httpupgrade_path:depends("transport", "httpupgrade")\
+' "$NODE_CONFIG"
+fi
+
+echo.
+echo "[#] Passwall + HTTPUpgrade Patch [#]"
