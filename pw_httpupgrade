@@ -41,8 +41,9 @@ httpupgradepathdepends("transport", "httpupgrade")' "$file"
 }
 
 echo "Patching Passwall to Support HttpUpgrade..."
-✅ fix_httpupgrade_node
-✅ fix_link parse
+fix_node_config
+fix_util_xray  
+fix_subscribe
 
 /etc/init.d/passwall restart
 echo "✅ Patches complited!"
