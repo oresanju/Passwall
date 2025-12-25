@@ -2,7 +2,6 @@
 # Patch Passwall to support HTTPUpgrade transport
 # Creates .bk backups before modifying
 echo "[#] Patch Passwall to support HTTPUpgrade [#]"
-echo.
 # File paths
 UTIL_XRAY="/usr/lib/lua/luci/passwall/util_xray.lua"
 SUBSCRIBE="/usr/share/passwall/subscribe.lua"
@@ -14,9 +13,9 @@ backup_file() {
     local backup="${file}.bk"
     if [ ! -f "$backup" ]; then
         cp "$file" "$backup"
-        echo "[+] Backup file"
+        echo "[+] Backup file : $backup"
     else
-        echo "[-] Backup already exists"
+        echo "[-] Backup already exists : $backup"
     fi
 }
 
@@ -85,5 +84,4 @@ httpupgrade_path:depends("transport", "httpupgrade")\
 ' "$NODE_CONFIG"
 fi
 
-echo.
 echo "[#] Passwall + HTTPUpgrade Patch [#]"
